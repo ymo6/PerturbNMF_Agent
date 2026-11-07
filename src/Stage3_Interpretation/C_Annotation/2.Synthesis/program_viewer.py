@@ -20,15 +20,28 @@ activator (knocking it down lowers the program); positive is a repressor.
 After the last program, the rail's "Top hypotheses" page shows <run_dir>/Synthesis/hypotheses.json
 (generate_hypotheses.py) when it exists; a hypothesis citing a program whose label changed since is hidden.
 With --home_url the top bar links back to every project (publish_viewer.py sets it).
+After the layered interpretation, the "Figure evidence from cited papers" card shows
+<run_dir>/Synthesis/Figures/P<k>/figure_evidence.json (figure_evidence.py; never read from Programs/, which the agent
+can write) when it was made for the current label and the current interpretation.json bytes: per (slot, cited paper)
+the paper's system next to this screen's, the finding the figure is judged against, and per figure the crop (embedded
+only when the record allows it, its file passes the name / type / size / sha256 checks and the size caps hold), its
+label, page, box and caption, the model's reading (what is visible, what the caption says, interpretation, relation to
+the cited finding) and the record's checks. It is a reading of the paper's figure, not a test of this screen, and it
+never changes the interpretation's confidence. --max_figure_mb caps the embedded image bytes of the whole file,
+--max_figures_embedded_per_program the images per program (over a cap the figure is listed without its image);
+--no_figures leaves the card out. The figure metadata (no image bytes) is also written to <out stem>.figures.json.
 Programs without label.json are skipped. Without --perturbation_path_base / --motif_enrichment_path only
 the standard library is needed (pandas otherwise).
 """
 
 import argparse
+import base64
 import csv
 import json
 import math
+import os
 import re
+import stat
 import sys
 from datetime import datetime
 from html import escape
@@ -36,14 +49,23 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from html_report import _js_safe, gene_card, gene_entries, gene_name, select_regulators  # noqa: E402
-from program_bundle import load_run  # noqa: E402
+from figure_contract import (
+    CROP_NAME_RE,
+    MEDIA_TYPES,
+    SCHEMA_VERSION,
+    paper_links,
+    safe_child,
+    sha256_bytes,
+    validate_record,
+)
+from html_report import _js_safe, gene_card, gene_entries, gene_name, select_regulators
+from program_bundle import load_run
 from program_site import (
     CELL_TYPE_TEXT,
     PUBMED,
     driver_block,
     driver_records,
-    family_name,  # noqa: E402
+    family_name,
     gene_paper_meta,
     other_paper_records,
     paper_records,
@@ -291,6 +313,190 @@ def load_interpretation(run_dir, pid, label):
     }
 
 
+# ---- figure evidence (figure_evidence.py) ----------------------------------------------------------------------------
+MAX_RECORD_BYTES, MAX_CROP_BYTES = 5_000_000, 3_000_000
+MAGIC = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
+ITEM_KEYS = (
+    "slot",
+    "slot_claim",
+    "pmid",
+    "sub_claim",
+    "paper_context",
+    "context_match",
+    "status",
+    "reason",
+)
+FIGURE_KEYS = (
+    "crop_id",
+    "page",
+    "bbox_pt",
+    "coord",
+    "dpi",
+    "method",
+    "figure_label",
+    "panel_label",
+    "caption",
+    "caption_truncated",
+    "caption_source",
+    "width_px",
+    "height_px",
+    "analysis_status",
+    "analysis_error",
+    "analysis",
+    "checks",
+    "selection",
+)
+
+
+def _read_regular(path, max_bytes):
+    """Bytes of a regular file opened without following a symlink; None when unreadable or over max_bytes."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            return None
+        data = fh.read(max_bytes + 1)
+    return data if len(data) <= max_bytes else None
+
+
+def _crop_uri(crops, f, paper):
+    """(data URI or None, note) of one figure's crop: only when the record's embed flag is true (figure_evidence.py
+    decides from the license and --embed_license; records come only from Synthesis/Figures) and the file is the
+    named crop (plain name crop_id + ext, regular file inside crops/), of its media type, under 3 MB, with its sha256."""
+    lic = paper.get("license") or "unknown"
+    if f.get("embed") is not True:
+        return None, f"not embedded: license {lic}"
+    name = Path(str(f.get("file") or "")).name
+    ext = name.rsplit(".", 1)[-1]
+    media = MEDIA_TYPES.get(ext)
+    ok_name = (
+        media and media == f.get("media_type") and name == f"{f.get('crop_id')}.{ext}"
+    )
+    path = safe_child(crops, name, CROP_NAME_RE.pattern) if ok_name else None
+    data = _read_regular(path, MAX_CROP_BYTES) if path else None
+    if (
+        data is None
+        or not data.startswith(MAGIC[media])
+        or sha256_bytes(data) != f.get("sha256")
+    ):
+        return None, "crop missing or changed"
+    return f"data:{media};base64,{base64.b64encode(data).decode('ascii')}", ""
+
+
+def load_figure_evidence(run_dir, pid, label, figures_root=None):
+    """(figures meta for the page or None, {crop_id: data URI}, warnings) of <figures_root>/P<k>/figure_evidence.json
+    (default <run_dir>/Synthesis/Figures, never Programs/). Shown only when the record is valid, was made for the
+    current label and for the current interpretation.json bytes; the meta holds no file path."""
+    root = (
+        Path(figures_root) if figures_root else Path(run_dir) / "Synthesis" / "Figures"
+    )
+    pdir = root / f"P{pid}"
+    if not os.path.lexists(pdir / "figure_evidence.json"):
+        return None, {}, []
+    path = safe_child(pdir, "figure_evidence.json")
+    data = _read_regular(path, MAX_RECORD_BYTES) if path else None
+    if data is None:
+        return (
+            None,
+            {},
+            [
+                "figure_evidence.json is not a regular file of at most 5 MB; figures not shown"
+            ],
+        )
+    try:
+        rec = json.loads(data)
+    except ValueError:
+        return None, {}, ["figure_evidence.json is not valid JSON; figures not shown"]
+    errs = validate_record(rec)
+    if not errs and rec["program"] != f"P{pid}":
+        errs = [f"record is for {rec['program']}"]
+    if errs:
+        return (
+            None,
+            {},
+            [
+                f"figure_evidence.json invalid ({'; '.join(errs[:3])}); figures not shown"
+            ],
+        )
+    if rec["label"] != label["program_name"]:
+        return (
+            None,
+            {},
+            [
+                f'figures were made for "{rec["label"]}", not the current label; not shown (rerun figure_evidence.py)'
+            ],
+        )
+    interp = _read_regular(
+        Path(run_dir) / "Programs" / f"P{pid}" / "interpretation.json", 50_000_000
+    )
+    if interp is None or sha256_bytes(interp) != rec["interpretation_sha256"]:
+        return (
+            None,
+            {},
+            ["figures were made for an older interpretation; rerun figure_evidence.py"],
+        )
+    crops, images, items = pdir / "crops", {}, []
+    for it in rec["items"]:
+        paper = it.get("paper") if isinstance(it.get("paper"), dict) else {}
+        figs = []
+        for f in it.get("figures") or []:
+            uri, note = _crop_uri(crops, f, paper)
+            if uri:
+                images[f["crop_id"]] = uri
+            figs.append(
+                {
+                    **{k: f.get(k) for k in FIGURE_KEYS},
+                    "has_image": bool(uri),
+                    "image_note": note,
+                }
+            )
+        items.append(
+            {
+                **{k: it.get(k) for k in ITEM_KEYS},
+                "paper": {
+                    "title": paper.get("title") or "",
+                    "year": str(paper.get("year") or ""),
+                    "license": paper.get("license") or "",
+                    "links": paper_links(
+                        paper.get("pmid") or it.get("pmid"),
+                        paper.get("doi"),
+                        paper.get("pmcid"),
+                    ),
+                },
+                "figures": figs,
+            }
+        )
+    meta = {
+        "screen_context": rec.get("screen_context") or "",
+        "model": rec.get("model") or "",
+        "items": items,
+    }
+    return meta, images, []
+
+
+def cap_figures(figures, images, max_bytes, per_program):
+    """Embedded images within the caps (in program order): at most per_program crops per program and max_bytes of
+    data URIs in all; a figure over a cap keeps its metadata with has_image False. ({crop_id: uri}, n dropped)."""
+    kept, total, dropped = {}, 0, 0
+    for pid, meta in figures.items():
+        mine = set()
+        for f in (f for it in meta["items"] for f in it["figures"] if f["has_image"]):
+            cid, uri = f["crop_id"], images[pid][f["crop_id"]]
+            if cid not in mine and (
+                len(mine) >= per_program or total + len(uri) > max_bytes
+            ):
+                f["has_image"], f["image_note"] = False, "dropped: size cap"
+                dropped += 1
+                continue
+            if cid not in mine:
+                mine.add(cid)
+                total += len(uri)
+                kept[cid] = uri
+    return kept, dropped
+
+
 def program_data(
     pid, bundle, label, args, tables, names, index, motif_tables=None, go_table=None
 ):
@@ -365,6 +571,14 @@ def program_data(
         "label_model": label.get("model", ""),
         "source": f"{Path(args.run_dir).resolve().name}/Programs/P{pid}",
     }
+
+
+def script_json(obj):
+    """Compact ASCII JSON safe inside an inline <script>: html_report._js_safe, with '<!--' as '<\\u0021--' (valid JSON
+    as well as JS; _js_safe's '<\\!--' is JS only, so publish_viewer.viewer_programs could not read it back)."""
+    return _js_safe(json.dumps(obj, separators=(",", ":"), ensure_ascii=True)).replace(
+        "<\\!--", "<\\u0021--"
+    )
 
 
 def load_hypotheses(path, labels):
@@ -522,6 +736,25 @@ def build_parser():
         default="",
         help="Free-text provenance of the motif results, shown under the motif card (e.g. motif database, promoter window, enhancer links).",
     )
+
+    # figure evidence (optional; figure_evidence.py outputs in <run_dir>/Synthesis/Figures)
+    p.add_argument(
+        "--max_figure_mb",
+        type=float,
+        default=25,
+        help="Cap on the embedded figure images of the whole viewer, in MB; figures over it are listed without their image.",
+    )
+    p.add_argument(
+        "--max_figures_embedded_per_program",
+        type=int,
+        default=6,
+        help="Figure images embedded per program; further figures are listed without their image.",
+    )
+    p.add_argument(
+        "--no_figures",
+        action="store_true",
+        help="Leave the figure evidence card out (no figure_evidence.json is read).",
+    )
     return p
 
 
@@ -585,6 +818,40 @@ def main():
             )
         )
 
+    figures, images = {}, {}
+    if not args.no_figures:
+        for pid in programs:
+            if not programs[pid][
+                "interpretation"
+            ]:  # the card sits in the interpretation section
+                continue
+            meta_f, imgs, warns = load_figure_evidence(args.run_dir, pid, labels[pid])
+            for w in warns:
+                print(f"  [warn] P{pid}: {w}")
+            if meta_f:
+                figures[pid], images[pid] = meta_f, imgs
+    kept, dropped = cap_figures(
+        figures,
+        images,
+        args.max_figure_mb * 1e6,
+        args.max_figures_embedded_per_program,
+    )
+    if dropped:
+        print(
+            f"  [warn] {dropped} figure image(s) over --max_figure_mb {args.max_figure_mb:g} / "
+            f"--max_figures_embedded_per_program {args.max_figures_embedded_per_program}; listed without their "
+            f"image ({len(kept)} embedded, {sum(map(len, kept.values())) / 1e6:.1f} MB)"
+        )
+    for (
+        pid,
+        meta_f,
+    ) in figures.items():  # added last: without figures the program data is unchanged
+        programs[pid]["figures"] = meta_f
+        figs = [f for it in meta_f["items"] for f in it["figures"]]
+        print(
+            f"  P{pid}: {len(figs)} figure(s) shown, {sum(f['has_image'] for f in figs)} embedded"
+        )
+
     counts = {}
     for p in programs.values():
         counts[p["group"]] = counts.get(p["group"], 0) + 1
@@ -618,21 +885,33 @@ def main():
     }
     out = Path(args.out or Path(args.run_dir) / "Report" / "program_viewer.html")
     out.parent.mkdir(parents=True, exist_ok=True)
-    # small placeholders first, then the data blobs (never re-scanned)
-    html = (
-        TEMPLATE_PATH.read_text()
-        .replace(
-            "__PAGE_TITLE__",
-            args.dataset_name.replace("&", "&amp;").replace("<", "&lt;"),
-        )
-        .replace("__HOME_URL__", escape(args.home_url, quote=True))
-        .replace("__HOME_HIDDEN__", "" if args.home_url else " hidden")
-        .replace("__META_JSON__", _js_safe(json.dumps(meta, separators=(",", ":"))))
-        .replace(
-            "__PROGRAMS_JSON__", _js_safe(json.dumps(programs, separators=(",", ":")))
-        )
-    )
+    subs = {
+        "__PAGE_TITLE__": args.dataset_name.replace("&", "&amp;").replace("<", "&lt;"),
+        "__HOME_URL__": escape(args.home_url, quote=True),
+        "__HOME_HIDDEN__": "" if args.home_url else " hidden",
+        "__META_JSON__": script_json(meta),
+        "__PROGRAMS_JSON__": script_json(programs),
+        "__FIGURES_JSON__": script_json(kept),
+    }
+    # one pass: text put in for one placeholder is never scanned for another (a caption may read "__META_JSON__")
+    html = re.sub("|".join(subs), lambda m: subs[m.group()], TEMPLATE_PATH.read_text())
     out.write_text(html)
+    sidecar = out.with_suffix(
+        ".figures.json"
+    )  # figure metadata without image bytes (publish_viewer.py copies it)
+    if figures:
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "programs": {f"P{pid}": m for pid, m in figures.items()},
+                },
+                indent=1,
+            )
+            + "\n"
+        )
+    elif sidecar.exists():
+        sidecar.unlink()
     print(
         f"[done] {len(programs)} program(s) -> {out} ({out.stat().st_size / 1e6:.1f} MB)"
     )

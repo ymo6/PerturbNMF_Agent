@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__PAGE_TITLE__ — program annotations</title>
 <!-- Layout and palette follow the single-file annotation viewer; filled by program_viewer.py. -->
@@ -120,6 +121,19 @@ ol.go { margin: 4px 0 0; padding-left: 22px; }
 .motif-table td { vertical-align: middle; padding: 2px 8px; }
 .motif-table td.num { white-space: nowrap; }
 svg.logo { display: block; background: #fff; border-radius: 3px; }
+.figev { overflow-wrap: anywhere; }
+.figitem { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+.figitem:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+.figitem h4 { margin: 0 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.figitem p { margin: 0 0 4px; }
+figure.fig { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-soft); }
+figure.fig img { display: block; width: auto; height: auto; max-width: 100%; max-height: 520px; object-fit: contain;
+  background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 4px; margin: 0 0 8px; }
+figure.fig figcaption { font-size: 12.5px; }
+figure.fig ul { margin: 2px 0 6px; padding-left: 18px; font-size: 12.5px; }
+.relbadge { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-soft); }
+.figwarn { font-size: 12px; color: var(--text-soft); border-left: 3px solid var(--warning); padding-left: 8px; margin: 4px 0; }
 </style>
 </head>
 <body>
@@ -141,11 +155,14 @@ svg.logo { display: block; background: #fff; border-radius: 3px; }
 <script>
 const PROGRAMS = __PROGRAMS_JSON__;
 const META = __META_JSON__;
+const FIGURES = __FIGURES_JSON__;
 // ---- data ---------------------------------------------------------------------------------
 const DAYS = META.conditions;
 const IDS = Object.keys(PROGRAMS).map(Number).sort((a,b)=>a-b);
 let currentId = null;
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// only http(s) links from data (no javascript:, data: or relative urls); "" = render no link
+const safeUrl = u => /^https?:\/\//i.test(String(u||"")) ? String(u) : "";
 document.getElementById("brand").textContent = META.title;
 // adj p like Python's "{:.2g}": two significant digits, exponent form below 1e-4
 function fmtP(q) {
@@ -358,7 +375,8 @@ const VERDICT = {supported: "var(--good)", mixed: "var(--warning)", contradicted
 function verdictCell(v) { return `<span class="status"><span class="dot" style="background:${VERDICT[v] || "var(--muted)"}"></span>${esc(v)}</span>`; }
 const pmidLink = id => `<a href="https://pubmed.ncbi.nlm.nih.gov/${esc(id)}/" target="_blank" rel="noopener">PMID ${esc(id)}</a>`;
 function paperItem(x) {
-  const title = x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>` : esc(x.title);
+  const url = safeUrl(x.url);
+  const title = url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(x.title)}</a>` : esc(x.title);
   const info = [x.year ? esc(x.year) : "", x.pmid ? pmidLink(x.pmid) : "",
                 x.same ? `<span class="flag" style="color:var(--good)">same cell type</span>` : ""].filter(Boolean).join(" · ");
   return `<li><div>${title}</div>${x.text ? `<div class="small">${esc(x.text)}</div>` : ""}${info ? `<div class="small muted">${info}</div>` : ""}</li>`;
@@ -495,9 +513,78 @@ function interpretationCards(p, beforeModules = "") {
     <div class="card"><h3>Layered interpretation <span class="muted small" style="font-weight:400">· coherence: ${esc(it.coherence)}</span></h3><div class="grid3">
       ${slotCard(p, "Upstream trigger", it.interpretation.upstream_trigger)}${slotCard(p, "Co-regulation mechanism", it.interpretation.coregulation_mechanism)}${slotCard(p, "Cellular output", it.interpretation.cellular_output)}</div>
       <p class="small muted" style="margin:8px 0 0">Outlined chips = knockdown regulators; plain chips = program genes.</p></div>
-    ${beforeModules}
+    ${figureCard(p)}${beforeModules}
     <details class="card"><summary>Modules (${it.modules.length})</summary>
       <p class="small muted">A module is a subset of this program's genes grouped under a narrower process or mechanism than the label. Strength says how well the genes and terms back it: supported, suggestive or speculative.</p>${modules || '<p class="muted">None.</p>'}${note}</details>`;
+}
+
+// ---- figure evidence (figure_evidence.py) -------------------------------------------------
+// FIGURES = {crop_id: data URI}; an image is drawn only for a png / jpeg base64 data URI
+const IMG_SRC = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+\/=]+$/;
+const SLOT_TITLE = {upstream_trigger: "Upstream trigger", coregulation_mechanism: "Co-regulation mechanism", cellular_output: "Cellular output"};
+const RELATION_TEXT = {supports: "Figure consistent with the cited finding", contradicts: "Figure conflicts with the cited finding",
+  not_clearly_addressed: "Figure does not clearly address this", cannot_assess: "Cannot assess"};
+const ITEM_STATUS_TEXT = {pdf_unavailable: "No open-access PDF for this paper", extraction_error: "The PDF could not be read",
+  no_figures: "No captioned figure found in this paper", no_matching_figure: "No figure in this paper names the cited gene and claim; nothing analysed",
+  analysis_failed: "The figure analysis failed", pending_session: "Figure analysis not written yet",
+  skipped_budget: "Not analysed: spend or call cap reached", not_read: "The cited paper is not a read paper in the literature step"};
+const LABEL_STATUS_TEXT = {from_caption: "from caption", manual: "set by hand", uncertain: "uncertain"};
+const asList = v => v == null || v === "" ? [] : Array.isArray(v) ? v : [v];
+const listText = v => typeof v === "number" ? String(Number(v)) : asList(v).map(x => esc(typeof x === "object" ? JSON.stringify(x) : x)).join(", ");
+const CHECK_TEXT = {
+  unsupported_statistics: v => `Numbers not visible in the figure or caption: ${listText(v)}`,
+  unverified_terms: v => `Terms not found in the figure or caption: ${listText(v)}`,
+  removed_caption_copies: v => `Caption text copied into the reading was removed${typeof v === "number" ? ` (${Number(v)})` : `: ${listText(v)}`}`,
+  relation_downgraded_from: v => `Relation lowered from "${esc(RELATION_TEXT[v] || pretty(v))}"`,
+};
+function figureBlock(f, it) {
+  const paper = it.paper || {}, lab = f.figure_label || {}, src = FIGURES[f.crop_id];
+  const name = lab.value ? String(lab.value) : "Figure";
+  const img = f.has_image && typeof src === "string" && IMG_SRC.test(src)
+    ? `<img src="${esc(src)}" alt="${esc(name + " from " + (paper.title || "the cited paper"))}" loading="lazy"${Number(f.width_px) > 0 ? ` width="${Number(f.width_px)}"` : ""}${Number(f.height_px) > 0 ? ` height="${Number(f.height_px)}"` : ""} style="max-width:100%;height:auto">`
+    : `<p class="small muted">No image shown: ${esc(f.image_note || "crop missing or changed")}.</p>`;
+  const bbox = Array.isArray(f.bbox_pt) ? `[${f.bbox_pt.map(v => Number(v).toFixed(1)).join(", ")}] pt` : "";
+  const where = [Number(f.page) > 0 ? `page ${Number(f.page)}` : "",
+    bbox ? `<span title="${esc(`${f.coord || ""} · method: ${pretty(f.method)} · license: ${paper.license || "unknown"}`)}" style="border-bottom:1px dotted var(--muted)">${bbox}</span>` : ""].filter(Boolean).join(" · ");
+  const head = `<div><b>${esc(name)}</b>${lab.status ? ` <span class="muted">(${esc(LABEL_STATUS_TEXT[lab.status] || pretty(lab.status))})</span>` : ""}${f.caption_source === "next_page" ? ` <span class="muted">(legend from the next page)</span>` : ""}${where ? ` <span class="muted">· ${where}</span>` : ""}</div>`;
+  const lic = paper.license ? `license ${esc(paper.license)}` : "license unknown";
+  const credit = `<div class="small muted">Cropped from the cited paper (${lic}; authors and journal as linked above) · ${esc(pretty(f.method))}</div>`;
+  const caption = f.caption ? `<details class="more"><summary>Caption (from the PDF)${f.caption_truncated ? " · truncated" : ""}</summary><p class="small">${esc(f.caption)}</p></details>` : "";
+  const a = f.analysis;
+  const ul = v => asList(v).length ? `<ul>${asList(v).map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : `<p class="small muted">None.</p>`;
+  const reading = a ? `<div class="psub">What is visible (model reading of the image)</div>${ul(a.visible_observations)}
+      <div class="psub">From the caption</div>${ul(a.caption_context)}
+      <div class="psub">Interpretation</div><p class="small">${esc(a.interpretation)}</p>
+      <p class="small" style="margin-top:6px"><span class="relbadge">${esc(RELATION_TEXT[a.relation] || pretty(a.relation))}${it.context_match === "different" ? " (different system)" : ""}</span>${a.confidence ? ` <span class="muted">· ${esc(a.confidence)} confidence</span>` : ""}</p>
+      ${a.relation_rationale ? `<p class="small muted">${esc(a.relation_rationale)}</p>` : ""}`
+    : `<p class="small muted">No reading: analysis ${esc(pretty(f.analysis_status))}${f.analysis_error ? ` (${esc(f.analysis_error)})` : ""}.</p>`;
+  const warns = Object.entries(f.checks || {}).filter(([k, v]) => CHECK_TEXT[k] && (typeof v === "number" ? v > 0 : asList(v).length))
+    .map(([k, v]) => `<div class="figwarn">${CHECK_TEXT[k](v)}</div>`).join("");
+  return `<figure class="fig">${img}<figcaption>${head}${credit}${caption}${reading}${warns}</figcaption></figure>`;
+}
+function figureCard(p) {
+  const fg = p.figures;
+  if (!fg) return "";
+  const screen = fg.screen_context ? String(fg.screen_context) : "";
+  const items = (fg.items || []).map(it => {
+    const paper = it.paper || {}, links = paper.links || {};
+    const main = safeUrl(links.pubmed || links.doi || links.pmc);
+    const title = main ? `<a href="${esc(main)}" target="_blank" rel="noopener">${esc(paper.title || "Untitled paper")}</a>` : esc(paper.title || "Untitled paper");
+    const ids = [["pubmed", it.pmid ? `PMID ${it.pmid}` : "PubMed"], ["pmc", "PMC"], ["doi", "DOI"]]
+      .map(([k, t]) => safeUrl(links[k]) ? `<a href="${esc(safeUrl(links[k]))}" target="_blank" rel="noopener">${esc(t)}</a>` : (k === "pubmed" && it.pmid ? `PMID ${esc(it.pmid)}` : "")).filter(Boolean).join(" · ");
+    const context = [`Paper system: ${esc(it.paper_context || "not stated")}`, screen ? `This screen: ${esc(screen)}` : "",
+      esc(pretty(it.context_match))].filter(Boolean).join(" · ");
+    const status = it.status && it.status !== "ok"
+      ? `<p class="small muted">${esc(ITEM_STATUS_TEXT[it.status] || pretty(it.status))}${it.reason ? ` (${esc(it.reason)})` : ""}.</p>` : "";
+    return `<div class="figitem"><h4>${esc(SLOT_TITLE[it.slot] || pretty(it.slot))}</h4>
+      <p class="small">Paper: ${title}${paper.year ? ` (${esc(paper.year)})` : ""}${ids ? ` · ${ids}` : ""}</p>
+      <p class="small muted">${context}</p>
+      ${it.sub_claim ? `<p class="small">Judged against the paper's recorded finding: ${esc(it.sub_claim)}</p>` : ""}
+      ${status}${(it.figures || []).map(f => figureBlock(f, it)).join("")}</div>`;
+  }).join("");
+  return `<details class="card figev" open><summary>Figure evidence from cited papers (${(fg.items || []).length})</summary>
+    ${items || `<p class="muted">No cited paper was checked.</p>`}
+    <p class="small muted" style="margin:10px 0 0">Model reading of a cropped figure from the cited paper; it does not test this screen's program and never changes the interpretation's confidence.${fg.model ? ` Reading by ${esc(fg.model)}.` : ""}</p></details>`;
 }
 
 // ---- GO enrichment ------------------------------------------------------------------------

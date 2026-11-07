@@ -9,6 +9,20 @@ Entries marked ⚠️ change pipeline output — re-run affected analyses.
 
 ## [Unreleased]
 
+### Added
+- Figure evidence for the annotation viewer (`C_Annotation/2.Synthesis/figure_evidence.py`, `figure_extract.py`,
+  `figure_contract.py`, `run_figure_evidence.sh`): figures of the papers each interpretation cites are cropped from
+  their open-access PDFs (PyMuPDF), chosen by caption, read by Claude against the paper's recorded finding
+  (session backend by default) and shown in the viewer with page, box, caption, license and the model's reading.
+  `program_viewer.py` gains `--max_figure_mb`, `--max_figures_embedded_per_program` and `--no_figures`; without
+  figure records the viewer's data is unchanged. `api/LLM_interface.py` and `api/session_llm.py` accept images.
+
+### Fixed
+- Viewer links built from data are kept only when they are http(s) (a literature row's URL could carry a
+  `javascript:` or `data:` URL; those now render as plain text), and the viewer sets a Content-Security-Policy.
+- `pdf_download.pmid_to_ids` (vendored in the paper skills): the NCBI ID converter moved and refuses Python HTTP
+  clients, so PMID-only lookups silently found no PMCID; it now falls back to E-utilities esummary.
+
 ### Changed
 - **Breaking:** `--organism` is renamed `--species` (matching Stage 1 inference) in
   evaluation, U-test calibration, the Excel summary and annotation prep

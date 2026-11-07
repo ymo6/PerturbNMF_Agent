@@ -1,9 +1,9 @@
 # %%
-import anthropic
-from pydantic import ValidationError
-from pydantic import BaseModel
+import base64
 
+import anthropic
 from budget import claude_cost, claude_worst_case
+from pydantic import BaseModel, ValidationError
 
 
 class ProgramAnnotation(BaseModel):
@@ -11,6 +11,15 @@ class ProgramAnnotation(BaseModel):
     top_pathways: list[str]
     confidence: float
     rationale: str
+
+
+def image_token_estimate(images, images_px=None):
+    """Input tokens of images (width * height / 750 each); 1568 x 1568 per image when sizes are not given."""
+    if not images:
+        return 0
+    if images_px:
+        return sum(w * h / 750 for w, h in images_px)
+    return len(images) * 1568 * 1568 / 750
 
 
 class claude_api:
@@ -23,12 +32,12 @@ class claude_api:
             None  # why the latest get_json returned None (for the step's run record)
         )
 
-    def _fits(self, system_prompt, prompt, max_tokens):
+    def _fits(self, system_prompt, prompt, max_tokens, image_tokens=0):
         """False (and recorded as skipped) when the call's worst case does not fit the program's budget."""
         if self.budget is None:
             return True
         estimate = claude_worst_case(
-            self.model, len(system_prompt) + len(prompt), max_tokens
+            self.model, len(system_prompt) + len(prompt), max_tokens, image_tokens
         )
         if self.budget.allows(estimate, self.budget_reserve):
             return True
@@ -69,19 +78,43 @@ class claude_api:
             print(e)
             return None
 
+    # HiveBlot principle reuse (western_blot_miner/llm_client.py:AnthropicClient.complete_json @727b4f0): image sent as a base64 content block before the text; refusal is an error. New code.
     def get_json(
-        self, system_prompt, prompt, schema_model, effort="medium", max_tokens=4000
+        self,
+        system_prompt,
+        prompt,
+        schema_model,
+        effort="medium",
+        max_tokens=4000,
+        images=None,
+        images_px=None,
     ):
+        """images: optional [(bytes, media_type)], sent in order before the prompt text; images_px: optional
+        [(width, height)] of them for the worst-case cost (default: the largest image the API keeps)."""
         self.last_error = None
-        if not self._fits(system_prompt, prompt, max_tokens):
+        image_tokens = image_token_estimate(images, images_px)
+        if not self._fits(system_prompt, prompt, max_tokens, image_tokens):
             self.last_error = "skipped: worst-case cost does not fit the program budget"
             return None
+        content = prompt
+        if images:
+            content = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": base64.standard_b64encode(data).decode("ascii"),
+                    },
+                }
+                for data, media_type in images
+            ] + [{"type": "text", "text": prompt}]
         try:
             msg = self.client.messages.parse(
                 model=self.model,
                 max_tokens=max_tokens,
                 system=system_prompt,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": content}],
                 output_format=schema_model,
                 output_config={
                     "effort": effort

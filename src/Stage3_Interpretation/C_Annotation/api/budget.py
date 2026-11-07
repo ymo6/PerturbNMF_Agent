@@ -48,10 +48,12 @@ def claude_cost(model, usage):
     ) / 1e6
 
 
-def claude_worst_case(model, prompt_chars, max_tokens):
-    """Upper bound of one call: the whole prompt as input, max_tokens of output."""
+def claude_worst_case(model, prompt_chars, max_tokens, image_tokens=0):
+    """Upper bound of one call: the whole prompt (plus image_tokens of images) as input, max_tokens of output."""
     p_in, p_out = prices(model)
-    return (prompt_chars / CHARS_PER_TOKEN * p_in + max_tokens * p_out) / 1e6
+    return (
+        (prompt_chars / CHARS_PER_TOKEN + image_tokens) * p_in + max_tokens * p_out
+    ) / 1e6
 
 
 def embedding_cost(model, n_chars):

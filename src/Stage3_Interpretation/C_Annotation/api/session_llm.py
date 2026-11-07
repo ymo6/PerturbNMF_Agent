@@ -9,6 +9,10 @@ the program (set handler.key before the call) and works in two passes over
 <hash> is the first 8 hex digits of sha1(system + prompt), so an answer is only ever read back for the exact
 prompt it answered: a rerun with --overwrite, a changed label or new evidence writes a new request.
 
+With images (figure_evidence.py), each image's sha256 is appended to the hashed text, and the request also lists
+"images": [{"path", "sha256", "media_type"}] (path relative to the run folder holding <session_dir>, else the file
+name) and an "instructions" line: the answering session opens and looks at every image before it answers.
+
 First pass: no answer yet -> the request is written and the call returns None (pending). Someone (e.g.
 Claude Code agents) writes each answer file. Second pass: the answer is validated against the same pydantic
 schema the API call would use and returned. Nothing is billed to the API. The steps default to this backend
@@ -39,12 +43,42 @@ class session_llm:
             None,
         )  # of the latest call: answered | pending | invalid
 
+    def _image_path(self, path):
+        """path relative to the run folder (the parent of session_dir), else the bare file name."""
+        path = Path(path)
+        try:
+            return (
+                path.resolve().relative_to(self.dir.parent.parent.resolve()).as_posix()
+            )
+        except ValueError:
+            return path.name
+
     def get_json(
-        self, system_prompt, prompt, schema_model, effort="medium", max_tokens=4000
+        self,
+        system_prompt,
+        prompt,
+        schema_model,
+        effort="medium",
+        max_tokens=4000,
+        images=None,
+        images_px=None,
     ):
+        """images: optional [(bytes, media_type, path)]; images_px is accepted for the API signature and unused."""
         if not self.key:
             raise ValueError("set handler.key (e.g. 'P12') before each call")
-        name = f"{self.key}__{hashlib.sha1((system_prompt + prompt).encode()).hexdigest()[:8]}"
+        text = system_prompt + prompt
+        listed = []
+        for data, media_type, path in images or ():
+            digest = hashlib.sha256(data).hexdigest()
+            text += digest
+            listed.append(
+                {
+                    "path": self._image_path(path),
+                    "sha256": digest,
+                    "media_type": media_type,
+                }
+            )
+        name = f"{self.key}__{hashlib.sha1(text.encode()).hexdigest()[:8]}"
         answer = self.dir / f"{name}.answer.json"
         if answer.exists():
             try:
@@ -58,18 +92,20 @@ class session_llm:
                 return None
             self.last_status, self.last_error = "answered", None
             return parsed
-        (self.dir / f"{name}.request.json").write_text(
-            json.dumps(
-                {
-                    "key": name,
-                    "system": system_prompt,
-                    "prompt": prompt,
-                    "schema": schema_model.model_json_schema(),
-                    "answer_file": str(answer),
-                },
-                indent=2,
+        request = {
+            "key": name,
+            "system": system_prompt,
+            "prompt": prompt,
+            "schema": schema_model.model_json_schema(),
+            "answer_file": str(answer),
+        }
+        if listed:
+            request["images"] = listed
+            request["instructions"] = (
+                "Open each image file in 'images' (paths are relative to the run folder that holds the session "
+                "folder) and look at it before answering; check its sha256. Answer from what the image shows."
             )
-        )
+        (self.dir / f"{name}.request.json").write_text(json.dumps(request, indent=2))
         self.n_pending += 1
         self.last_status, self.last_error = "pending", None
         print(f"  [session] {name}: request written; answer pending ({answer})")
