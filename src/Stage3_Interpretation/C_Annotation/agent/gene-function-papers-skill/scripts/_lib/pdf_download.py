@@ -27,7 +27,8 @@ from pathlib import Path
 
 import requests
 
-ID_CONVERTER = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+ID_CONVERTER = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"  # moved from www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/
+ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 PMC_S3 = "https://pmc-oa-opendata.s3.amazonaws.com"
 UNPAYWALL = "https://api.unpaywall.org/v2/{doi}"
 
@@ -76,19 +77,36 @@ def _download(url, dest, timeout=DEFAULT_TIMEOUT, params=None):
 
 
 def pmid_to_ids(pmid, timeout=DEFAULT_TIMEOUT):
-    """Resolve a PMID to {pmcid, doi} via the NCBI ID converter (empty dict on failure)."""
+    """Resolve a PMID to {pmcid, doi}: the NCBI ID converter, else E-utilities esummary (empty dict on failure).
+
+    The ID converter moved to pmc.ncbi.nlm.nih.gov and answers 403 to Python HTTP clients there (checked
+    2026-11-07); E-utilities, NCBI's documented programmatic API, returns the same ids."""
     params = {"ids": str(pmid), "format": "json", "tool": TOOL_NAME}
     if _email():
         params["email"] = _email()
+    headers = {"User-Agent": _user_agent()}
     try:
-        resp = requests.get(ID_CONVERTER, params=params, timeout=timeout)
+        resp = requests.get(
+            ID_CONVERTER, params=params, timeout=timeout, headers=headers
+        )
         records = resp.json().get("records", []) if resp.status_code == 200 else []
     except (requests.RequestException, ValueError):
+        records = []
+    if records:
+        rec = records[0]
+        return {"pmcid": rec.get("pmcid"), "doi": rec.get("doi")}
+    params = {"db": "pubmed", "id": str(pmid), "retmode": "json", "tool": TOOL_NAME}
+    if _email():
+        params["email"] = _email()
+    try:
+        resp = requests.get(ESUMMARY, params=params, timeout=timeout, headers=headers)
+        doc = resp.json()["result"][str(pmid)] if resp.status_code == 200 else {}
+    except (requests.RequestException, ValueError, KeyError, TypeError):
         return {}
-    if not records:
+    ids = {a.get("idtype"): a.get("value") for a in doc.get("articleids") or []}
+    if not ids.get("pmc") and not ids.get("doi"):
         return {}
-    rec = records[0]
-    return {"pmcid": rec.get("pmcid"), "doi": rec.get("doi")}
+    return {"pmcid": ids.get("pmc"), "doi": ids.get("doi")}
 
 
 def pmc_pdf_url(pmcid, timeout=DEFAULT_TIMEOUT):
@@ -102,7 +120,9 @@ def pmc_pdf_url(pmcid, timeout=DEFAULT_TIMEOUT):
     ):  # articles are versioned PMCxxxx.1, .2, ...; keep the newest
         try:
             resp = requests.get(
-                f"{PMC_S3}/metadata/{pmcid}.{version}.json", timeout=timeout
+                f"{PMC_S3}/metadata/{pmcid}.{version}.json",
+                timeout=timeout,
+                headers={"User-Agent": _user_agent()},
             )
         except requests.RequestException as e:
             return None, f"PMC error ({type(e).__name__})"
