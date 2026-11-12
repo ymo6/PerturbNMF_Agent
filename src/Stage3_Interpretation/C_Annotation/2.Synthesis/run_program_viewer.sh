@@ -14,7 +14,8 @@
 # top genes + unique genes, driving genes (when the optional driver_genes step ran), significant regulators (inline
 # SVG volcano per condition + log2FC table with --perturbation_path_base), STRING links among the regulators,
 # TF motif enrichment (with --motif_enrichment_path), confounder rule-outs, layered
-# interpretation and modules, top GO terms.
+# interpretation, figure evidence from the cited papers (when figure_evidence.py wrote
+# <RUN_DIR>/Synthesis/Figures; --no_figures leaves it out), modules, top GO terms.
 # Drop the --perturbation_path_base / --motif_* blocks for a viewer without them (standard library only).
 
 set -euo pipefail
@@ -47,7 +48,9 @@ python $SCRIPT_DIR/program_viewer.py \
   --motif_enrichment_path $RESULT/Evaluation/$K_DIR/${K}_motif_enrichment.txt \
   --candidate_tfs_path $RESULT/Evaluation/$K_DIR/${K}_candidate_tfs.txt \
   --motif_logos_path $RESULT/Evaluation/$K_DIR/${K}_motif_logos.json \
-  --motif_source_label "<motif database, promoter window, enhancer links>"
+  --motif_source_label "<motif database, promoter window, enhancer links>" \
+  --max_figure_mb 25 \
+  --max_figures_embedded_per_program 6
 
 # Publish to a static site (e.g. a GitHub Pages repo clone): <SITE_DIR>/<dataset slug>/viewer.html, its site.json and
 # the root index.html linking every dataset's viewer. Commit + push SITE_DIR yourself (the pages are public).

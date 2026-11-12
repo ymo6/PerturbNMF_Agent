@@ -7,6 +7,8 @@ writes
     <site_dir>/<slug>/viewer.html   the viewer (program_viewer.py output), with its "All projects" button pointing to
                                     --home_url (default ../index.html, the root index below)
     <site_dir>/<slug>/site.json     dataset name, programs, date, page ("viewer.html"), read by the root index
+    <site_dir>/<slug>/viewer.figures.json   the viewer's figure-evidence metadata (<viewer stem>.figures.json, no
+                                    image bytes), when program_viewer.py wrote one; an older copy is removed otherwise
     <site_dir>/index.html           one card per dataset folder with a site.json, linking to its viewer
 
 and removes the older per-program pages of that dataset folder (index.html, P<k>.html, from program_site.py) unless
@@ -16,6 +18,7 @@ and removes the older per-program pages of that dataset folder (index.html, P<k>
 import argparse
 import json
 import re
+import shutil
 import sys
 from datetime import datetime
 from html import escape
@@ -23,7 +26,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from program_site import page, slugify  # noqa: E402
+from program_site import page, slugify
 
 
 def viewer_programs(path):
@@ -102,6 +105,14 @@ def main():
         set_home(Path(args.viewer).read_text(encoding="utf-8"), args.home_url),
         encoding="utf-8",
     )
+    sidecar, published = (
+        Path(args.viewer).with_suffix(".figures.json"),
+        out / "viewer.figures.json",
+    )
+    if sidecar.is_file():
+        shutil.copyfile(sidecar, published)
+    elif published.exists():
+        published.unlink()
     today = datetime.now().strftime("%Y-%m-%d")
     (out / "site.json").write_text(
         json.dumps(

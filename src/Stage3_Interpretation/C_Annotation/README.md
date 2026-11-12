@@ -13,7 +13,8 @@ C_Annotation/
   agent/         skills, Claude format: <name>-skill/{SKILL.md, scripts/, references/}
   1.Annotate/    run_program_agent.py (one agent per program), sandbox.py (Bubblewrap sandbox per agent),
                  validate_program.py (the step checks)
-  2.Synthesis/   build_ledgers.py, synthesize_regulators.py, generate_hypotheses.py, program_viewer.py (the viewer),
+  2.Synthesis/   build_ledgers.py, synthesize_regulators.py, generate_hypotheses.py, figure_evidence.py +
+                 figure_extract.py + figure_contract.py (figures of the cited papers), program_viewer.py (the viewer),
                  publish_viewer.py,
                  html_report.py, program_site.py (helpers the viewer imports)
   api/           Claude API / session backends, budget ledger, run records, prompt loader, .env reader
@@ -30,6 +31,7 @@ C_Annotation/
 | 3 | Annotation agents | `1.Annotate/run_program_agent.py` | per program: gene info, interactions, literature, label, interpretation |
 | 4 | Status | `status.py` (with its recheck option) | `<run>/Annotation_status.tsv` |
 | 5 | Programs together | `2.Synthesis/build_ledgers.py`, `synthesize_regulators.py`, `generate_hypotheses.py` (top hypotheses of the screen, one call; shown after the last program in the viewer) | `<run>/Synthesis/` (`hypotheses.json`) |
+| 5b | Figure evidence (optional) | `2.Synthesis/figure_evidence.py` (`run_figure_evidence.sh`, geneqa env): per interpretation slot and cited paper, crops the captioned figures of the open-access PDF, keeps those whose caption names a cited gene and the claim, and has Claude read each image against the paper's recorded finding (session backend by default; no figure, no call) | `<run>/Synthesis/Figures/P<k>/` (`figure_evidence.json`, `crops/`) |
 | 6 | Viewer (default output) | `2.Synthesis/program_viewer.py`, then `publish_viewer.py` to put it on a site | `<run>/Report/program_viewer.html`; `<site>/<dataset>/viewer.html` + root index |
 | — | STRING refresh (existing runs) | `0.Prepare/refresh_string.py` | `string_sig.tsv`, `string_genes.json` (+ `regulator_context.md` / evidence where not yet interpreted) |
 | — | Tested hypotheses (optional) | `agent/perturbseq-hypotheses-skill` (Claude Code skill; tests each candidate against the data, unlike `generate_hypotheses.py`) | its own run folder |
@@ -101,3 +103,25 @@ the agent as environment variables from an allowlist; the network stays on for t
 live in `<run>/.sandbox/P<k>/`, outside what the agent can see. Before any model call a canary checks all of this
 inside the sandbox and skips the program if anything leaks (`_runs/agent.json` records the result).
 `1.Annotate/sandbox.py` runs the canary by hand for one program folder (its check mode).
+
+## Figure evidence
+
+`2.Synthesis/figure_evidence.py` adds, per program, the figures of the papers its interpretation cites, shown in the
+viewer under "Figure evidence from cited papers". Only the open-access PDFs the literature step downloaded are used
+(`--fetch_missing` tries the same open-access routes again); a paper without one is listed as unavailable.
+
+- Figures: PyMuPDF finds "Figure N" / "Fig. N" captions and crops the images and drawings next to them, or the band
+  between the caption and the body text when the page is mostly vector art; whole figures only, never panels.
+  Tables, uncaptioned graphics and scanned pages are skipped. Every crop records the paper ids, the PDF sha256, the
+  page, the box in PDF points (top-left origin, `figure_contract.COORD`), the dpi, the method and the label as found.
+  `Programs/P<k>/figure_overrides.json` sets or excludes a box by hand (format in `figure_contract.py`).
+- Selection: no model. A figure qualifies only when its caption names a cited gene (aliases from `gene_info.jsonl`)
+  and shares a non-generic term with the claim; otherwise the item is "no matching figure" and nothing is sent.
+- Analysis: the model sees the crop and judges it against the paper's recorded finding (the sub-claim), not against
+  the program. It returns what is visible, what the caption adds and an interpretation, plus a relation
+  (supports / contradicts / not clearly addressed / cannot assess). Host checks drop observations copied from the
+  caption, flag numbers not in the caption and names outside the program's evidence, and downgrade a relation with
+  no observation left. Figures never change the interpretation or its confidence.
+- Publishing: crops are embedded in the single-file viewer (data URIs, `--max_figure_mb` total) only when the paper's
+  license allows redistribution (CC BY / BY-SA / BY-NC / BY-NC-SA / CC0); otherwise the viewer shows the reference
+  and the analysis without the image. Untrusted PDFs are parsed in a time- and CPU-limited child process.
